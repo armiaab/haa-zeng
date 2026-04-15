@@ -1,0 +1,1 @@
+This code was purposed to reproduce [https://pubs.acs.org/doi/10.1021/acs.jctc.3c00527](Quantum Neural Network Inspired Hardware Adaptable Ansatz for Efficient Quantum Simulation of Chemical Systems) by Zeng et. all with some modification using qiskit instead Q^2 chemistry
