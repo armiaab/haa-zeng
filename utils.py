@@ -159,41 +159,64 @@ def expressibility(circuit, n_samples=500, n_bins=50, eps=1e-12, seed=None):
         fidelities.append(state_fidelity(psi1, psi2))
 
     fidelities = np.array(fidelities)
+    fidelities = np.clip(fidelities, 0, 1)  # Ensure fidelities are in [0,1]
 
-    hist, edges = np.histogram(fidelities, bins=n_bins, range=(0, 1), density=True)
+    hist, edges = np.histogram(fidelities, bins=n_bins, range=(0, 1))
+    bin_centers = (edges[:-1] + edges[1:]) / 2
     width = edges[1] - edges[0]
+    
+    p_ansatz = hist / (n_samples * width)
 
-    p_ansatz = hist * width
-
-    p_haar = (1 - edges[:-1]) ** (N - 1) - (1 - edges[1:]) ** (N - 1)
+    p_haar = (N - 1) * (1 - bin_centers) ** (N - 2) * width
+    p_haar = p_haar / np.sum(p_haar)  # Ensure normalization
 
     p_ansatz = np.clip(p_ansatz, eps, None)
     p_haar = np.clip(p_haar, eps, None)
+    
+    p_ansatz = p_ansatz / np.sum(p_ansatz)
+    p_haar = p_haar / np.sum(p_haar)
 
-    p_ansatz /= np.sum(p_ansatz)
-    p_haar /= np.sum(p_haar)
-
-    return entropy(p_ansatz, p_haar)
+    return float(entropy(p_ansatz, p_haar))
 
 
-def bp_analysis(circuit, qop, n_anc, n_samples=20):
-    qop_ext = SparsePauliOp.from_list([("I"*n_anc,1.0)]).tensor(qop) if n_anc else qop
-    H = qop_ext.to_matrix(); H = H.toarray() if issparse(H) else H
-    grads = []
+def bp_analysis(circuit, qop, n_anc, n_samples=20, seed=None):
+    rng = np.random.default_rng(seed)
+    
+    qop_ext = SparsePauliOp.from_list([("I"*n_anc, 1.0)]).tensor(qop) if n_anc else qop
+    H = qop_ext.to_matrix()
+    H = H.toarray() if issparse(H) else H
+    
+    all_grads = []
+    n_params = circuit.num_parameters
+    n_check = min(20, n_params)
+    
     for _ in range(n_samples):
-        params = np.random.uniform(0, 2*np.pi, circuit.num_parameters)
-        g = []
-        for i in range(min(10, circuit.num_parameters)):
-            pp, pm = params.copy(), params.copy(); pp[i] += np.pi/2; pm[i] -= np.pi/2
-            psip, psim = Statevector(circuit.assign_parameters(pp)).data, Statevector(circuit.assign_parameters(pm)).data
-            g.append((np.real(np.vdot(psip, H@psip)) - np.real(np.vdot(psim, H@psim))) / 2)
-        grads.append(g)
-    return np.mean(np.abs(grads))
+        params = rng.uniform(0, 2*np.pi, n_params)
+        
+        for i in range(n_check):
+            pp, pm = params.copy(), params.copy()
+            pp[i] += np.pi / 2
+            pm[i] -= np.pi / 2
+            
+            try:
+                psip = Statevector(circuit.assign_parameters(pp)).data
+                psim = Statevector(circuit.assign_parameters(pm)).data
+                
+                # Compute gradient via parameter shift rule
+                exp_p = np.real(np.vdot(psip, H @ psip))
+                exp_m = np.real(np.vdot(psim, H @ psim))
+                grad = (exp_p - exp_m) / 2
+                
+                all_grads.append(abs(grad))
+            except Exception:
+                # Skip if numerical issues
+                continue
+    
+    return float(np.mean(all_grads)) if all_grads else 0.0
 
 
 def run_vqe(circuit, qop, optimizer_cls, n_anc=0,
-            n_restart=5, enuc=0.0, e_off=0.0):
-
+            n_restart=5, enuc=0.0, e_off=0.0, warm_start=None):
     if n_anc:
         qop_ext = qop.tensor(
             SparsePauliOp.from_list([("I"*n_anc, 1.0)])
@@ -206,16 +229,22 @@ def run_vqe(circuit, qop, optimizer_cls, n_anc=0,
     ])
 
     best_energy = np.inf
+    best_params = None
+    num_params = circuit.num_parameters
 
-    for _ in range(n_restart):
+    if warm_start is not None:
+        initial_points = [warm_start] + [
+            np.random.uniform(0, 2*np.pi, num_params)
+            for _ in range(n_restart - 1)
+        ]
+    else:
+        initial_points = [
+            np.random.uniform(0, 2*np.pi, num_params)
+            for _ in range(n_restart)
+        ]
 
+    for x0 in initial_points:
         optimizer = optimizer_cls()
-
-        x0 = np.random.uniform(
-            0, 2*np.pi,
-            circuit.num_parameters
-        )
-
         vqe = VQE(
             StatevectorEstimator(),
             circuit,
@@ -223,10 +252,11 @@ def run_vqe(circuit, qop, optimizer_cls, n_anc=0,
             initial_point=x0
         )
 
-        energy = vqe.compute_minimum_eigenvalue(
-            qop_shift
-        ).eigenvalue.real
+        result = vqe.compute_minimum_eigenvalue(qop_shift)
+        energy = result.eigenvalue.real
 
-        best_energy = min(best_energy, energy)
+        if energy < best_energy:
+            best_energy = energy
+            best_params = result.x
 
-    return best_energy
+    return best_energy, best_params
