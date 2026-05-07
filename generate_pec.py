@@ -14,7 +14,7 @@ expressibilities = []
 
 layer = 1
 ancilla = 1
-maxiter = 2000
+maxiter = 100
 
 warm_start_params = {
     'haa_can': None,
@@ -54,7 +54,7 @@ def run_experiment(r):
     warm_start_params['qrqnn'] = params_qrqnn
     
     energies.append((energy_haa_can, energy_haa_u3cx, energy_hea, energy_qrqnn, E_HF, E_FCI))
-    print(f"r={r:.2f}: HAA-CAN={energy_haa_can:.4f}, HAA-U3CX={energy_haa_u3cx:.4f}, HEA={energy_hea:.4f}, QRQNN={energy_qrqnn:.4f}")
+    print(energies[-1])
 
 
 for r in r_list:

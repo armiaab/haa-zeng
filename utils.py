@@ -257,6 +257,6 @@ def run_vqe(circuit, qop, optimizer_cls, n_anc=0,
 
         if energy < best_energy:
             best_energy = energy
-            best_params = result.x
+            best_params = result.optimal_point
 
     return best_energy, best_params
