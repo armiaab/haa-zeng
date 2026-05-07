@@ -16,7 +16,6 @@ layer = 1
 ancilla = 1
 maxiter = 2000
 
-# Storage for warm start parameters from previous geometry
 warm_start_params = {
     'haa_can': None,
     'haa_u3cx': None,
