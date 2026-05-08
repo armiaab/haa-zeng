@@ -16,56 +16,126 @@ from qiskit_nature.second_q.transformers import FreezeCoreTransformer
 from qiskit_nature.second_q.circuit.library import HartreeFock
 
 
-def build_haa(n_sys, n_anc, n_layers, hf_circuit=None, internal="can", coupling="cc"):
-    n_qubits = n_sys + n_anc
+def givens_block(qc, p, i, q0, q1):
+    qc.cx(q1, q0)
+    qc.cry(p[i], q0, q1)
+    qc.rz(p[i+1], q0)
+    qc.cx(q1, q0)
+    return i + 2
+
+def fsim_block(qc, p, i, q0, q1):
+    qc.rz(p[i], q0)
+    qc.rz(p[i+1], q1)
+    qc.cx(q0, q1)
+    qc.ry(p[i+2], q0)
+    qc.rz(p[i+3], q1)
+    qc.cx(q1, q0)
+    qc.ry(p[i+4], q0)
+    qc.cx(q0, q1)
+    qc.rz(p[i+5], q1)
+    return i + 6
+
+def su4_block(qc, p, i, q0, q1):
+    qc.u(p[i],   p[i+1], p[i+2], q0)
+    qc.u(p[i+3], p[i+4], p[i+5], q1)
+    qc.cx(q0, q1)
+    qc.ry(p[i+6],  q0)
+    qc.rz(p[i+7],  q1)
+    qc.cx(q1, q0)
+    qc.ry(p[i+8],  q0)
+    qc.cx(q0, q1)
+    qc.u(p[i+9],  p[i+10], p[i+11], q0)
+    qc.u(p[i+12], p[i+13], p[i+14], q1)
+    return i + 15
+
+_ENTANGLE_PARAMS = {
+    "can":    3,
+    "u3cx":   6,
+    "givens": 2,
+    "fsim":   6,
+    "su4":    15,
+}
+
+def _get_pairs(coupling, n_sys, n_anc, n_qubits):
     if coupling == "cc":
-        if n_anc == 0:
-            raise ValueError("cross coupling (cc) needs at least one ancilla qubit")
-        pairs = [(s, n_sys + a) for a in range(n_anc) for s in range(n_sys)]
+        return [(s, n_sys + a) for a in range(n_anc) for s in range(n_sys)]
     elif coupling == "ac":
-        pairs = [(i, i + 1) for i in range(n_qubits - 1)]
-    else:
-        raise ValueError("coupling must be 'ac' or 'cc'")
+        return [(i, i + 1) for i in range(n_qubits - 1)]
+    elif coupling == "ring":
+        return [(i, (i + 1) % n_qubits) for i in range(n_qubits)]
+    elif coupling == "full":
+        # system-to-system + system-to-ancilla
+        sys_pairs  = [(i, j) for i in range(n_sys) for j in range(i+1, n_sys)]
+        anc_pairs  = [(s, n_sys + a) for a in range(n_anc) for s in range(n_sys)]
+        return sys_pairs + anc_pairs
+    elif coupling == "skip":
+        nn   = [(i, i + 1) for i in range(n_qubits - 1)]
+        skip = [(i, i + 2) for i in range(n_qubits - 2)]
+        return nn + skip
+    elif coupling == "alternate":
+        return None
 
-    if internal == "can":
-        n_params = 3 * n_sys * (n_layers + 1) + 3 * len(pairs) * n_layers
-    elif internal == "u3cx":
-        n_params = 3 * n_sys * (n_layers + 1) + 6 * len(pairs) * n_layers
-    else:
-        raise ValueError("internal must be 'can' or 'u3cx'")
+def _apply_entangle(qc, p, i, g, q0, q1):
+    if g == "can":
+        qc.rxx(p[i], q0, q1); qc.ryy(p[i+1], q0, q1); qc.rzz(p[i+2], q0, q1)
+        return i + 3
+    elif g == "u3cx":
+        qc.u(p[i], p[i+1], p[i+2], q0)
+        qc.u(p[i+3], p[i+4], p[i+5], q1)
+        qc.cx(q0, q1)
+        return i + 6
+    elif g == "givens":
+        return givens_block(qc, p, i, q0, q1)
+    elif g == "fsim":
+        return fsim_block(qc, p, i, q0, q1)
+    elif g == "su4":
+        return su4_block(qc, p, i, q0, q1)
 
-    p = ParameterVector("θ", n_params)
+
+def build_haa(n_sys, n_anc, n_layers, hf_circuit=None, internal="can", coupling="cc"):
+    """
+    internal: str or list of str per layer
+        options: 'can', 'u3cx', 'givens', 'fsim', 'su4'
+    coupling: str or list of str per layer
+        options: 'cc', 'ac', 'ring', 'full', 'skip', 'alternate'
+        'alternate' → odd layers use 'cc', even layers use 'ac'
+    """
+    internal_list = [internal] * n_layers if isinstance(internal, str) else list(internal)
+    coupling_list = [coupling] * n_layers if isinstance(coupling, str) else list(coupling)
+
+    # resolve 'alternate' coupling per layer
+    coupling_list = [
+        "cc" if (idx % 2 == 0) else "ac" if c == "alternate" else c
+        for idx, c in enumerate(coupling_list)
+    ]
+
+    n_qubits = n_sys + n_anc
+    pairs_per_layer = [_get_pairs(c, n_sys, n_anc, n_qubits) for c in coupling_list]
+
+    # count total parameters
+    n_params = 3 * n_sys * (n_layers + 1) + sum(
+        _ENTANGLE_PARAMS[g] * len(pairs)
+        for g, pairs in zip(internal_list, pairs_per_layer)
+    )
+
+    p  = ParameterVector("θ", n_params)
     qc = QuantumCircuit(n_qubits)
 
     if hf_circuit is not None:
         qc.compose(hf_circuit, qubits=range(n_sys), inplace=True)
 
     i = 0
-
     for q in range(n_sys):
-        qc.u(p[i], p[i+1], p[i+2], q)
-        i += 3
+        qc.u(p[i], p[i+1], p[i+2], q); i += 3
 
-    for _ in range(n_layers):
+    for g, pairs in zip(internal_list, pairs_per_layer):
         for q0, q1 in pairs:
-            if internal == "can":
-                qc.rxx(p[i], q0, q1)
-                qc.ryy(p[i+1], q0, q1)
-                qc.rzz(p[i+2], q0, q1)
-                i += 3
-
-            elif internal == "u3cx":
-                qc.u(p[i], p[i+1], p[i+2], q0)
-                qc.u(p[i+3], p[i+4], p[i+5], q1)
-                qc.cx(q0, q1)
-                i += 6
-
-        # next system layer
+            i = _apply_entangle(qc, p, i, g, q0, q1)
         for q in range(n_sys):
-            qc.u(p[i], p[i+1], p[i+2], q)
-            i += 3
+            qc.u(p[i], p[i+1], p[i+2], q); i += 3
 
     return qc
+
 
 def build_hea(n_qubits, n_layers, hf_circuit=None):
     pairs = [(i, i + 1) for i in range(n_qubits - 1)]
@@ -218,14 +288,12 @@ def bp_analysis(circuit, qop, n_anc, n_samples=20, seed=None):
 def run_vqe(circuit, qop, optimizer_cls, n_anc=0,
             n_restart=5, enuc=0.0, e_off=0.0, warm_start=None):
     if n_anc:
-        qop_ext = qop.tensor(
-            SparsePauliOp.from_list([("I"*n_anc, 1.0)])
-        )
+        qop_ext = SparsePauliOp.from_list([("I" * n_anc, 1.0)]).tensor(qop)
     else:
         qop_ext = qop
 
     qop_shift = qop_ext + SparsePauliOp.from_list([
-        ("I"*qop_ext.num_qubits, enuc + e_off)
+        ("I" * qop_ext.num_qubits, enuc + e_off)
     ])
 
     best_energy = np.inf
